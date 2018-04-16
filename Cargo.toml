@@ -4,3 +4,17 @@ version = "0.1.0"
 authors = ["Zeyi Fan <fanzeyi1994@gmail.com>"]
 
 [dependencies]
+gotham = "0.2.1"
+gotham_derive = "0.2.1"
+clap = "2.31.2"
+hyper = "0.11.25"
+mime = "0.3.5"
+futures = "~0.1.21"
+log = "0.4"
+simplelog = "0.5.1"
+serde = "1.0.0"
+serde_derive = "1.0.0"
+serde_urlencoded = "0.5.1"
+diesel = { version = "1.2.2", features = ["mysql", "r2d2"] }
+r2d2 = "0.8.2"
+rand = "0.5.0-pre.0"
