@@ -1,14 +1,14 @@
 
-use std::time::SystemTime;
+use chrono::NaiveDateTime;
 use super::schema::url;
 
-#[derive(Queryable)]
+#[derive(Queryable, Debug)]
 pub struct Url {
     pub id: i32,
-    pub url: String,
     pub code: String,
+    pub url: String,
+    pub create_time: NaiveDateTime,
     pub count: i32,
-    pub create_time: SystemTime,
 }
 
 #[derive(Insertable)]

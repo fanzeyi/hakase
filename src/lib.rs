@@ -1,9 +1,11 @@
 
+#[macro_use]
 extern crate log;
 extern crate mime;
 extern crate r2d2;
 extern crate rand;
 extern crate hyper;
+extern crate chrono;
 #[macro_use]
 extern crate diesel;
 extern crate gotham;
@@ -20,7 +22,6 @@ use rand::distributions::Alphanumeric;
 
 use hyper::{Response, StatusCode, Body};
 use hyper::header::Location;
-use diesel::RunQueryDsl;
 use futures::{future, Stream, Future};
 
 use gotham::state::{FromState, State};
@@ -38,7 +39,8 @@ pub mod config;
 
 use self::middleware::{ConfigMiddleware, DieselMiddleware, ConnectionBox};
 use self::config::Config;
-use self::models::NewUrl;
+use self::models::{Url, NewUrl};
+use self::diesel::prelude::*;
 
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -145,6 +147,47 @@ fn create(mut state: State) -> Box<HandlerFuture> {
     Box::new(resp)
 }
 
+#[derive(Deserialize, StateData, StaticResponseExtender)]
+struct LookupExtractor {
+    #[serde(rename="*")]
+    code: Vec<String>,
+}
+
+fn lookup(mut state: State) -> (State, Response) {
+    let result = {
+        let request_code = {
+            let path = LookupExtractor::borrow_from(&state);
+            path.code.join("/")
+        };
+
+        let conn = {
+            let pool = state.take::<ConnectionBox>().pool;
+            let pool = pool.lock().unwrap();
+
+            pool.get().unwrap()
+        };
+
+        let result = {
+            use self::schema::url::dsl::*;
+
+            url.filter(code.eq(request_code))
+                .first::<Url>(&conn)
+        };
+
+        result.map(|url| {
+            url.url
+        })
+    };
+
+    let resp = match result {
+        Ok(url) => create_response(&state, StatusCode::MovedPermanently, None)
+            .with_header(Location::new(url)),
+        Err(_) => create_response(&state, StatusCode::NotFound, None)
+    };
+
+    (state, resp)
+}
+
 fn router(config: Config, thread: usize) -> Router {
     let database_url = config.database_url.clone();
     let (chain, pipelines) = single_pipeline(
@@ -156,6 +199,9 @@ fn router(config: Config, thread: usize) -> Router {
 
     build_router(chain, pipelines, |route| {
         route.post("/create").to(create);
+        route.get("/*")
+            .with_path_extractor::<LookupExtractor>()
+            .to(lookup);
     })
 }
 
