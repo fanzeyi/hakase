@@ -154,11 +154,61 @@ struct LookupExtractor {
 }
 
 fn lookup(mut state: State) -> (State, Response) {
+    let request_code = {
+        let path = LookupExtractor::borrow_from(&state);
+        path.code.join("/")
+    };
+
+    if request_code.ends_with("~") {
+        return lookup_count(state, request_code);
+    }
+
+    debug!("Looking up code: {}", request_code);
+
+    let conn = {
+        let pool = state.take::<ConnectionBox>().pool;
+        let pool = pool.lock().unwrap();
+
+        pool.get().unwrap()
+    };
+
     let result = {
-        let request_code = {
-            let path = LookupExtractor::borrow_from(&state);
-            path.code.join("/")
+
+        let result = {
+            use self::schema::url::dsl::*;
+
+            url.filter(code.eq(request_code))
+                .first::<Url>(&conn)
         };
+
+        result.and_then(|result| {
+            use self::schema::url::dsl::{url, count};
+            let _ = diesel::update(url.find(result.id))
+                .set(count.eq(count + 1))
+                .execute(&conn);
+
+            Ok(result)
+        })
+        .map(|url| {
+            url.url
+        })
+    };
+
+    let resp = match result {
+        Ok(url) => create_response(&state, StatusCode::MovedPermanently, None)
+            .with_header(Location::new(url)),
+        Err(_) => create_response(&state, StatusCode::NotFound, None)
+    };
+
+    (state, resp)
+}
+
+fn lookup_count(mut state: State, mut request_code: String) -> (State, Response) {
+    let result = {
+        let trimmed = request_code.len() - 1;
+        request_code.truncate(trimmed);
+
+        debug!("Looking up count: {}", request_code);
 
         let conn = {
             let pool = state.take::<ConnectionBox>().pool;
@@ -174,14 +224,11 @@ fn lookup(mut state: State) -> (State, Response) {
                 .first::<Url>(&conn)
         };
 
-        result.map(|url| {
-            url.url
-        })
+        result.map(|url| url.count)
     };
 
     let resp = match result {
-        Ok(url) => create_response(&state, StatusCode::MovedPermanently, None)
-            .with_header(Location::new(url)),
+        Ok(count) => create_response(&state, StatusCode::Ok, Some((format!("{}", count).into_bytes().to_vec(), mime::TEXT_PLAIN))),
         Err(_) => create_response(&state, StatusCode::NotFound, None)
     };
 

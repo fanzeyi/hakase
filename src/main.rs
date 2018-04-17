@@ -44,7 +44,7 @@ fn main() {
     let thread = value_t!(matches, "thread", usize).unwrap();
 
     if matches.is_present("debug") {
-        let _ = TermLogger::init(LevelFilter::Info, Config::default());
+        let _ = TermLogger::init(LevelFilter::Debug, Config::default());
     } else {
         let _ = TermLogger::init(LevelFilter::Error, Config::default());
     }
