@@ -8,7 +8,7 @@ service:
 env:
   DATABASE_URL: mysql://travis@localhost:3306/hakase_test
 before_install:
-  - mysql -e 'CREATE DATABASE IF NOT EIXSTS hakase_test';
+  - mysql -e 'CREATE DATABASE IF NOT EXISTS hakase_test';
 before_script:
   - cargo install diesel_cli
   - diesel migration run
