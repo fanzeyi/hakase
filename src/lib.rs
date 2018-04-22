@@ -10,6 +10,7 @@ extern crate chrono;
 extern crate diesel;
 extern crate gotham;
 extern crate futures;
+extern crate simplelog;
 #[macro_use]
 extern crate serde_derive;
 #[macro_use]
@@ -254,4 +255,113 @@ fn router(config: Config, thread: usize) -> Router {
 
 pub fn run(host: &str, port: u16, thread: usize, config: Config) {
     gotham::start_with_num_threads((host, port), thread, router(config, thread))
+}
+
+mod tests {
+    use super::*;
+    use super::config::Config;
+
+    use std::env;
+    use gotham::test::TestServer;
+    use simplelog::{TermLogger, LevelFilter};
+
+    fn create_test_server(password: Option<String>) -> TestServer {
+        let config = Config::new(password, env::var("DATABASE_URL").unwrap());
+
+        TestServer::new(router(config, 1)).unwrap()
+    }
+
+    #[test]
+    fn create_post() {
+        let ts = create_test_server(None);
+        let response = ts
+            .client()
+            .post("http://localhost/create", "url=http%3A%2F%2Fwww.google.com%2F", mime::TEXT_PLAIN)
+            .perform()
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::Created);
+    }
+
+    #[test]
+    fn create_post_with_password() {
+        let ts = create_test_server(Some(String::from("secret")));
+        let response = ts
+            .client()
+            .post("http://localhost/create", "url=http%3A%2F%2Fwww.google.com%2F", mime::TEXT_PLAIN)
+            .perform()
+            .unwrap();
+
+        assert_ne!(response.status(), StatusCode::Created);
+        assert_eq!(response.status(), StatusCode::BadRequest);
+
+        let response = ts
+            .client()
+            .post("http://localhost/create", "url=http%3A%2F%2Fwww.google.com%2F&password=secret", mime::TEXT_PLAIN)
+            .perform()
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::Created);
+    }
+
+    #[test]
+    fn create_post_with_code() {
+        let ts = create_test_server(None);
+        let code = format!("test-{}", generate_code());
+        let body = format!("url=http%3A%2F%2Fwww.google.com%2F&code={}", code);
+        let response = ts
+            .client()
+            .post("http://localhost/create", body, mime::TEXT_PLAIN)
+            .perform()
+            .unwrap();
+
+        let status = response.status();
+
+        assert_eq!(status, StatusCode::Created);
+
+        let location = response.headers().get::<Location>();
+        let value = location.unwrap().to_string();
+
+        assert_eq!(value, format!("/{}", code));
+    }
+
+    #[test]
+    fn test_lookup() {
+        let _ = TermLogger::init(LevelFilter::Info, simplelog::Config::default());
+
+        let ts = create_test_server(None);
+        let url = "http://www.google.com";
+        let payload = &[
+            ("url", url),
+        ];
+        let body = serde_urlencoded::to_string(payload).unwrap();
+
+        let response = ts
+            .client()
+            .post("http://localhost/create", body, mime::TEXT_PLAIN)
+            .perform()
+            .unwrap();
+
+        let location = response.headers().get::<Location>();
+        let location = location.unwrap();
+
+        let response = ts
+            .client()
+            .get(&format!("http://localhost{}", location))
+            .perform()
+            .unwrap();
+
+        let result = response.headers().get::<Location>().unwrap().to_string();
+
+        assert_eq!(result, url);
+
+        let response = ts
+            .client()
+            .get(&format!("http://localhost{}~", location))
+            .perform()
+            .unwrap();
+
+        let body = response.read_body().unwrap();
+
+        assert_eq!(&body[..], b"1");
+    }
 }
