@@ -10,5 +10,5 @@ env:
 before_install:
   - mysql -e 'CREATE DATABASE IF NOT EXISTS hakase_test';
 before_script:
-  - cargo install diesel_cli
+  - command -v diesel || cargo install diesel_cli
   - diesel migration run
