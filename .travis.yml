@@ -1,0 +1,14 @@
+language: rust
+cache: cargo
+rust:
+  - stable
+  - beta
+service:
+  - mysql
+env:
+  DATABASE_URL: mysql://travis@localhost:3306/hakase_test
+before_install:
+  - mysql -e 'CREATE DATABASE IF NOT EIXSTS hakase_test';
+before_script:
+  - cargo install diesel_cli
+  - diesel migration run
