@@ -1,17 +1,17 @@
 #[macro_use]
 extern crate clap;
-extern crate mush;
+extern crate hakase;
 extern crate simplelog;
 
 use clap::{App, Arg};
 use simplelog::{TermLogger, LevelFilter, Config};
-use mush::config;
+use hakase::config;
 
 fn main() {
-    let matches = App::new("zris")
+    let matches = App::new("Hakase")
         .version("0.0.1")
         .author("Zeyi Fan <i@zr.is>")
-        .about("Behind zr.is")
+        .about("A URL shorter.")
         .arg(Arg::with_name("host")
              .short("h")
              .long("host")
@@ -56,5 +56,5 @@ fn main() {
         database_url.to_string(),
     );
 
-    mush::run(host, port, thread, config);
+    hakase::run(host, port, thread, config);
 }
