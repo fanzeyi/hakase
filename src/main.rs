@@ -36,7 +36,8 @@ fn main() {
              .long("debug"))
         .arg(Arg::with_name("secret")
              .short("s")
-             .long("secret"))
+             .long("secret")
+             .value_name("SECRET"))
         .get_matches();
 
     let host = matches.value_of("host").unwrap();
