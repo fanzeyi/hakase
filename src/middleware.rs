@@ -1,17 +1,16 @@
-
 use std::sync::{Arc, Mutex};
 
-use r2d2::Pool;
 use diesel::mysql::MysqlConnection;
 use diesel::r2d2::ConnectionManager;
+use r2d2::Pool;
 
-use gotham::state::State;
-use gotham::state::StateData;
 use gotham::handler::HandlerFuture;
 use gotham::middleware::Middleware;
+use gotham::state::State;
+use gotham::state::StateData;
+use gotham_derive::NewMiddleware;
 
 use super::config::Config;
-
 
 #[derive(Clone, NewMiddleware)]
 pub struct ConfigMiddleware {
@@ -37,7 +36,6 @@ impl ConfigMiddleware {
     }
 }
 
-
 pub type ConnectionPool = Arc<Mutex<Pool<ConnectionManager<MysqlConnection>>>>;
 
 #[derive(Clone, NewMiddleware)]
@@ -56,7 +54,9 @@ impl Middleware for DieselMiddleware {
     where
         Chain: FnOnce(State) -> Box<HandlerFuture>,
     {
-        state.put(ConnectionBox { pool: self.pool.clone() });
+        state.put(ConnectionBox {
+            pool: self.pool.clone(),
+        });
         Box::new(chain(state))
     }
 }

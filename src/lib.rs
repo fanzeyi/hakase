@@ -1,48 +1,33 @@
-
-#[macro_use]
-extern crate log;
-extern crate mime;
-extern crate r2d2;
-extern crate rand;
-extern crate hyper;
-extern crate chrono;
-#[macro_use]
-extern crate diesel;
-extern crate gotham;
-extern crate futures;
-extern crate simplelog;
-#[macro_use]
-extern crate serde_derive;
-#[macro_use]
-extern crate gotham_derive;
-extern crate serde_urlencoded;
-
-use std::iter;
-use rand::{Rng, thread_rng};
 use rand::distributions::Alphanumeric;
+use rand::{thread_rng, Rng};
+use std::iter;
 
-use hyper::{Response, StatusCode, Body};
+use futures::{future, Future, Stream};
 use hyper::header::Location;
-use futures::{future, Stream, Future};
+use hyper::{Body, Response, StatusCode};
 
-use gotham::state::{FromState, State};
-use gotham::router::Router;
-use gotham::router::builder::{build_router, DrawRoutes, DefineSingleRoute};
+use diesel::prelude::*;
 use gotham::handler::HandlerFuture;
 use gotham::http::response::create_response;
 use gotham::pipeline::new_pipeline;
 use gotham::pipeline::single::single_pipeline;
+use gotham::router::builder::{build_router, DefineSingleRoute, DrawRoutes};
+use gotham::router::Router;
+use gotham::state::{FromState, State};
+use gotham_derive::StateData;
+use gotham_derive::StaticResponseExtender;
+use log::debug;
+use serde_derive::Deserialize;
+use serde_derive::Serialize;
 
+pub mod config;
 mod middleware;
 mod models;
 mod schema;
-pub mod config;
 
-use self::middleware::{ConfigMiddleware, DieselMiddleware, ConnectionBox};
 use self::config::Config;
-use self::models::{Url, NewUrl};
-use self::diesel::prelude::*;
-
+use self::middleware::{ConfigMiddleware, ConnectionBox, DieselMiddleware};
+use self::models::{NewUrl, Url};
 
 #[derive(Serialize, Deserialize, Debug)]
 struct CreateForm {
@@ -65,7 +50,7 @@ impl<'a> CreateForm {
             code: self.code.or(Some(generate_code())),
             ..self
         }
-    } 
+    }
 
     fn as_insertable(&'a self) -> NewUrl<'a> {
         NewUrl {
@@ -75,15 +60,19 @@ impl<'a> CreateForm {
     }
 }
 
-enum CreateError { Bad(&'static str) }
+enum CreateError {
+    Bad(&'static str),
+}
 
 impl CreateError {
     fn into_response(self, state: &State) -> Response {
         match self {
-            CreateError::Bad(reason) =>
-                create_response(state, StatusCode::BadRequest, Some((reason.as_bytes().to_vec(), mime::TEXT_PLAIN)))
+            CreateError::Bad(reason) => create_response(
+                state,
+                StatusCode::BadRequest,
+                Some((reason.as_bytes().to_vec(), mime::TEXT_PLAIN)),
+            ),
         }
-        
     }
 }
 
@@ -97,37 +86,34 @@ fn create(mut state: State) -> Box<HandlerFuture> {
     let body = state.take::<Body>();
     let resp = body.concat2().then(move |body| {
         // why can't we have a nice async connection pool?
-        let conn = {
+        let mut conn = {
             let pool = state.take::<ConnectionBox>().pool;
             let pool = pool.lock().unwrap();
 
             pool.get().unwrap()
         };
 
-        let result = body.map(|body| body.to_vec())
+        let result = body
+            .map(|body| body.to_vec())
             .map_err(|_| CreateError::Bad("body parse failed."))
             .and_then(|body| {
                 serde_urlencoded::from_bytes::<CreateForm>(&body[..])
                     .map_err(|_| CreateError::Bad("url decode failed"))
             })
-            .and_then(|data| {
-                match (data.password.clone(), secret) {
-                    (Some(ref password), Some(ref secret)) if password == secret => Ok(data),
-                    (_, None) => Ok(data), 
-                    _ => Err(CreateError::Bad("password does not match"))
-                }
+            .and_then(|data| match (data.password.clone(), secret) {
+                (Some(ref password), Some(ref secret)) if password == secret => Ok(data),
+                (_, None) => Ok(data),
+                _ => Err(CreateError::Bad("password does not match")),
             })
-            .and_then(|form| {
-                Ok(form.ensure_code())
-            })
+            .and_then(|form| Ok(form.ensure_code()))
             .and_then(|form| {
                 let result = {
                     use schema::url;
                     let insertable = form.as_insertable();
                     diesel::insert_into(url::table)
                         .values(&insertable)
-                        .execute(&conn)
-                        .or(Err(CreateError::Bad("can not insert into database"))) 
+                        .execute(&mut conn)
+                        .or(Err(CreateError::Bad("can not insert into database")))
                 };
 
                 result.and(Ok(form))
@@ -139,7 +125,7 @@ fn create(mut state: State) -> Box<HandlerFuture> {
 
         let resp = match result {
             Ok(resp) => resp,
-            Err(e) => e.into_response(&state)
+            Err(e) => e.into_response(&state),
         };
 
         future::ok((state, resp))
@@ -150,7 +136,7 @@ fn create(mut state: State) -> Box<HandlerFuture> {
 
 #[derive(Deserialize, StateData, StaticResponseExtender)]
 struct LookupExtractor {
-    #[serde(rename="*")]
+    #[serde(rename = "*")]
     code: Vec<String>,
 }
 
@@ -166,7 +152,7 @@ fn lookup(mut state: State) -> (State, Response) {
 
     debug!("Looking up code: {}", request_code);
 
-    let conn = {
+    let mut conn = {
         let pool = state.take::<ConnectionBox>().pool;
         let pool = pool.lock().unwrap();
 
@@ -174,31 +160,28 @@ fn lookup(mut state: State) -> (State, Response) {
     };
 
     let result = {
-
         let result = {
             use self::schema::url::dsl::*;
 
-            url.filter(code.eq(request_code))
-                .first::<Url>(&conn)
+            url.filter(code.eq(request_code)).first::<Url>(&mut conn)
         };
 
-        result.and_then(|result| {
-            use self::schema::url::dsl::{url, count};
-            let _ = diesel::update(url.find(result.id))
-                .set(count.eq(count + 1))
-                .execute(&conn);
+        result
+            .and_then(|result| {
+                use self::schema::url::dsl::{count, url};
+                let _ = diesel::update(url.find(result.id))
+                    .set(count.eq(count + 1))
+                    .execute(&mut conn);
 
-            Ok(result)
-        })
-        .map(|url| {
-            url.url
-        })
+                Ok(result)
+            })
+            .map(|url| url.url)
     };
 
     let resp = match result {
         Ok(url) => create_response(&state, StatusCode::MovedPermanently, None)
             .with_header(Location::new(url)),
-        Err(_) => create_response(&state, StatusCode::NotFound, None)
+        Err(_) => create_response(&state, StatusCode::NotFound, None),
     };
 
     (state, resp)
@@ -211,7 +194,7 @@ fn lookup_count(mut state: State, mut request_code: String) -> (State, Response)
 
         debug!("Looking up count: {}", request_code);
 
-        let conn = {
+        let mut conn = {
             let pool = state.take::<ConnectionBox>().pool;
             let pool = pool.lock().unwrap();
 
@@ -221,16 +204,19 @@ fn lookup_count(mut state: State, mut request_code: String) -> (State, Response)
         let result = {
             use self::schema::url::dsl::*;
 
-            url.filter(code.eq(request_code))
-                .first::<Url>(&conn)
+            url.filter(code.eq(request_code)).first::<Url>(&mut conn)
         };
 
         result.map(|url| url.count)
     };
 
     let resp = match result {
-        Ok(count) => create_response(&state, StatusCode::Ok, Some((format!("{}", count).into_bytes().to_vec(), mime::TEXT_PLAIN))),
-        Err(_) => create_response(&state, StatusCode::NotFound, None)
+        Ok(count) => create_response(
+            &state,
+            StatusCode::Ok,
+            Some((format!("{}", count).into_bytes().to_vec(), mime::TEXT_PLAIN)),
+        ),
+        Err(_) => create_response(&state, StatusCode::NotFound, None),
     };
 
     (state, resp)
@@ -242,12 +228,13 @@ fn router(config: Config, thread: usize) -> Router {
         new_pipeline()
             .add(ConfigMiddleware::new(config))
             .add(DieselMiddleware::new(database_url, thread))
-            .build()
+            .build(),
     );
 
     build_router(chain, pipelines, |route| {
         route.post("/create").to(create);
-        route.get("/*")
+        route
+            .get("/*")
             .with_path_extractor::<LookupExtractor>()
             .to(lookup);
     })
@@ -258,12 +245,12 @@ pub fn run(host: &str, port: u16, thread: usize, config: Config) {
 }
 
 mod tests {
-    use super::*;
     use super::config::Config;
+    use super::*;
 
-    use std::env;
     use gotham::test::TestServer;
-    use simplelog::{TermLogger, LevelFilter};
+    use simplelog::{LevelFilter, TermLogger};
+    use std::env;
 
     fn create_test_server(password: Option<String>) -> TestServer {
         let config = Config::new(password, env::var("DATABASE_URL").unwrap());
@@ -276,7 +263,11 @@ mod tests {
         let ts = create_test_server(None);
         let response = ts
             .client()
-            .post("http://localhost/create", "url=http%3A%2F%2Fwww.google.com%2F", mime::TEXT_PLAIN)
+            .post(
+                "http://localhost/create",
+                "url=http%3A%2F%2Fwww.google.com%2F",
+                mime::TEXT_PLAIN,
+            )
             .perform()
             .unwrap();
 
@@ -288,7 +279,11 @@ mod tests {
         let ts = create_test_server(Some(String::from("secret")));
         let response = ts
             .client()
-            .post("http://localhost/create", "url=http%3A%2F%2Fwww.google.com%2F", mime::TEXT_PLAIN)
+            .post(
+                "http://localhost/create",
+                "url=http%3A%2F%2Fwww.google.com%2F",
+                mime::TEXT_PLAIN,
+            )
             .perform()
             .unwrap();
 
@@ -297,7 +292,11 @@ mod tests {
 
         let response = ts
             .client()
-            .post("http://localhost/create", "url=http%3A%2F%2Fwww.google.com%2F&password=secret", mime::TEXT_PLAIN)
+            .post(
+                "http://localhost/create",
+                "url=http%3A%2F%2Fwww.google.com%2F&password=secret",
+                mime::TEXT_PLAIN,
+            )
             .perform()
             .unwrap();
         assert_eq!(response.status(), StatusCode::Created);
@@ -330,9 +329,7 @@ mod tests {
 
         let ts = create_test_server(None);
         let url = "http://www.google.com";
-        let payload = &[
-            ("url", url),
-        ];
+        let payload = &[("url", url)];
         let body = serde_urlencoded::to_string(payload).unwrap();
 
         let response = ts

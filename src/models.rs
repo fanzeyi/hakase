@@ -1,6 +1,7 @@
-
-use chrono::NaiveDateTime;
 use super::schema::url;
+use chrono::NaiveDateTime;
+use diesel::Insertable;
+use diesel::Queryable;
 
 #[derive(Queryable, Debug)]
 pub struct Url {
@@ -12,7 +13,7 @@ pub struct Url {
 }
 
 #[derive(Insertable)]
-#[table_name="url"]
+#[table_name = "url"]
 pub struct NewUrl<'a> {
     pub myurl: &'a str,
     pub code: &'a str,

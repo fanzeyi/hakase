@@ -1,5 +1,5 @@
-
 use gotham::state::StateData;
+use gotham_derive::StateData;
 
 #[derive(Clone, StateData, Debug)]
 pub struct Config {
