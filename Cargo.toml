@@ -7,7 +7,7 @@ edition = "2021"
 [dependencies]
 gotham = "0.2.1"
 gotham_derive = "0.2.1"
-clap = "2.34.0"
+clap = { version = "4.4", features = ["derive"] }
 hyper = "0.11.27"
 mime = "0.3.17"
 futures = "~0.1.31"
