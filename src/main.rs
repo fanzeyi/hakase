@@ -1,6 +1,6 @@
 use clap::Parser;
 use hakase::config;
-use simplelog::{Config, LevelFilter, TermLogger};
+use tracing_subscriber::{fmt, EnvFilter};
 
 #[derive(Parser, Debug)]
 #[command(name = "Hakase")]
@@ -36,11 +36,19 @@ struct Args {
 fn main() {
     let args = Args::parse();
 
-    if args.debug {
-        let _ = TermLogger::init(LevelFilter::Debug, Config::default());
+    let filter = if args.debug {
+        EnvFilter::from_default_env().add_directive("hakase=debug".parse().unwrap())
     } else {
-        let _ = TermLogger::init(LevelFilter::Error, Config::default());
-    }
+        EnvFilter::from_default_env().add_directive("hakase=info".parse().unwrap())
+    };
+    
+    let subscriber = fmt::Subscriber::builder()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .finish();
+    
+    tracing::subscriber::set_global_default(subscriber)
+        .expect("Failed to set global default subscriber");
 
     let host = &args.host;
     let port = args.port;

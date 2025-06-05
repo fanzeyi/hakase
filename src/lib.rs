@@ -16,9 +16,9 @@ use gotham::router::Router;
 use gotham::state::{FromState, State};
 use gotham_derive::StateData;
 use gotham_derive::StaticResponseExtender;
-use log::debug;
 use serde_derive::Deserialize;
 use serde_derive::Serialize;
+use tracing::debug;
 
 pub mod config;
 mod middleware;
@@ -244,13 +244,14 @@ pub fn run(host: &str, port: u16, thread: usize, config: Config) {
     gotham::start_with_num_threads((host, port), thread, router(config, thread))
 }
 
+#[cfg(test)]
 mod tests {
     use super::config::Config;
     use super::*;
 
     use gotham::test::TestServer;
-    use simplelog::{LevelFilter, TermLogger};
     use std::env;
+    use tracing_subscriber::fmt;
 
     fn create_test_server(password: Option<String>) -> TestServer {
         let config = Config::new(password, env::var("DATABASE_URL").unwrap());
@@ -325,7 +326,13 @@ mod tests {
 
     #[test]
     fn test_lookup() {
-        let _ = TermLogger::init(LevelFilter::Info, simplelog::Config::default());
+        let subscriber = fmt::Subscriber::builder()
+            .with_env_filter("hakase=info")
+            .with_writer(std::io::stderr)
+            .finish();
+
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("Failed to set global default subscriber");
 
         let ts = create_test_server(None);
         let url = "http://www.google.com";
