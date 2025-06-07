@@ -151,7 +151,7 @@ pub fn lookup(mut state: State) -> (State, Response) {
 
                 Ok(result)
             })
-            .map(|url| url.url)
+            .map(|url| url.myurl)
     };
 
     let resp = match result {

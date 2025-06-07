@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use diesel::mysql::MysqlConnection;
+use diesel::sqlite::SqliteConnection;
 use diesel::r2d2::ConnectionManager;
 use r2d2::Pool;
 
@@ -36,7 +36,7 @@ impl ConfigMiddleware {
     }
 }
 
-pub type ConnectionPool = Arc<Mutex<Pool<ConnectionManager<MysqlConnection>>>>;
+pub type ConnectionPool = Arc<Mutex<Pool<ConnectionManager<SqliteConnection>>>>;
 
 #[derive(Clone, NewMiddleware)]
 pub struct DieselMiddleware {

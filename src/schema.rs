@@ -3,10 +3,10 @@ use diesel::table;
 table! {
     url (id) {
         id -> Integer,
-        code -> Varchar,
+        code -> Text,
         #[sql_name="url"]
-        myurl -> Varchar,
-        create_time -> Datetime,
+        myurl -> Text,
+        create_time -> Timestamp,
         count -> Integer,
     }
 }
