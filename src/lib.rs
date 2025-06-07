@@ -1,226 +1,19 @@
-use rand::distributions::Alphanumeric;
-use rand::{thread_rng, Rng};
-use std::iter;
-
-use futures::{future, Future, Stream};
-use hyper::header::Location;
-use hyper::{Body, Response, StatusCode};
-
-use diesel::prelude::*;
-use gotham::handler::HandlerFuture;
-use gotham::http::response::create_response;
 use gotham::pipeline::new_pipeline;
 use gotham::pipeline::single::single_pipeline;
 use gotham::router::builder::{build_router, DefineSingleRoute, DrawRoutes};
 use gotham::router::Router;
-use gotham::state::{FromState, State};
-use gotham_derive::StateData;
-use gotham_derive::StaticResponseExtender;
-use serde_derive::Deserialize;
-use serde_derive::Serialize;
-use tracing::debug;
 
 pub mod config;
 mod middleware;
 mod models;
+mod routes;
 mod schema;
+mod utils;
 
 use self::config::Config;
-use self::middleware::{ConfigMiddleware, ConnectionBox, DieselMiddleware};
-use self::models::{NewUrl, Url};
-
-#[derive(Serialize, Deserialize, Debug)]
-struct CreateForm {
-    url: String,
-    code: Option<String>,
-    password: Option<String>,
-}
-
-fn generate_code() -> String {
-    let mut rng = thread_rng();
-    iter::repeat(())
-        .map(|()| rng.sample(Alphanumeric))
-        .take(5)
-        .collect()
-}
-
-impl<'a> CreateForm {
-    fn ensure_code(self) -> CreateForm {
-        CreateForm {
-            code: self.code.or(Some(generate_code())),
-            ..self
-        }
-    }
-
-    fn as_insertable(&'a self) -> NewUrl<'a> {
-        NewUrl {
-            myurl: self.url.as_str(),
-            code: self.code.as_ref().unwrap(),
-        }
-    }
-}
-
-enum CreateError {
-    Bad(&'static str),
-}
-
-impl CreateError {
-    fn into_response(self, state: &State) -> Response {
-        match self {
-            CreateError::Bad(reason) => create_response(
-                state,
-                StatusCode::BadRequest,
-                Some((reason.as_bytes().to_vec(), mime::TEXT_PLAIN)),
-            ),
-        }
-    }
-}
-
-fn create(mut state: State) -> Box<HandlerFuture> {
-    let secret = {
-        let config = Box::<Config>::borrow_from(&state);
-
-        config.secret.clone()
-    };
-
-    let body = state.take::<Body>();
-    let resp = body.concat2().then(move |body| {
-        // why can't we have a nice async connection pool?
-        let mut conn = {
-            let pool = state.take::<ConnectionBox>().pool;
-            let pool = pool.lock().unwrap();
-
-            pool.get().unwrap()
-        };
-
-        let result = body
-            .map(|body| body.to_vec())
-            .map_err(|_| CreateError::Bad("body parse failed."))
-            .and_then(|body| {
-                serde_urlencoded::from_bytes::<CreateForm>(&body[..])
-                    .map_err(|_| CreateError::Bad("url decode failed"))
-            })
-            .and_then(|data| match (data.password.clone(), secret) {
-                (Some(ref password), Some(ref secret)) if password == secret => Ok(data),
-                (_, None) => Ok(data),
-                _ => Err(CreateError::Bad("password does not match")),
-            })
-            .and_then(|form| Ok(form.ensure_code()))
-            .and_then(|form| {
-                let result = {
-                    use schema::url;
-                    let insertable = form.as_insertable();
-                    diesel::insert_into(url::table)
-                        .values(&insertable)
-                        .execute(&mut conn)
-                        .or(Err(CreateError::Bad("can not insert into database")))
-                };
-
-                result.and(Ok(form))
-            })
-            .map(|form| {
-                create_response(&state, StatusCode::Created, None)
-                    .with_header(Location::new(format!("/{}", form.code.unwrap())))
-            });
-
-        let resp = match result {
-            Ok(resp) => resp,
-            Err(e) => e.into_response(&state),
-        };
-
-        future::ok((state, resp))
-    });
-
-    Box::new(resp)
-}
-
-#[derive(Deserialize, StateData, StaticResponseExtender)]
-struct LookupExtractor {
-    #[serde(rename = "*")]
-    code: Vec<String>,
-}
-
-fn lookup(mut state: State) -> (State, Response) {
-    let request_code = {
-        let path = LookupExtractor::borrow_from(&state);
-        path.code.join("/")
-    };
-
-    if request_code.ends_with("~") {
-        return lookup_count(state, request_code);
-    }
-
-    debug!("Looking up code: {}", request_code);
-
-    let mut conn = {
-        let pool = state.take::<ConnectionBox>().pool;
-        let pool = pool.lock().unwrap();
-
-        pool.get().unwrap()
-    };
-
-    let result = {
-        let result = {
-            use self::schema::url::dsl::*;
-
-            url.filter(code.eq(request_code)).first::<Url>(&mut conn)
-        };
-
-        result
-            .and_then(|result| {
-                use self::schema::url::dsl::{count, url};
-                let _ = diesel::update(url.find(result.id))
-                    .set(count.eq(count + 1))
-                    .execute(&mut conn);
-
-                Ok(result)
-            })
-            .map(|url| url.url)
-    };
-
-    let resp = match result {
-        Ok(url) => create_response(&state, StatusCode::MovedPermanently, None)
-            .with_header(Location::new(url)),
-        Err(_) => create_response(&state, StatusCode::NotFound, None),
-    };
-
-    (state, resp)
-}
-
-fn lookup_count(mut state: State, mut request_code: String) -> (State, Response) {
-    let result = {
-        let trimmed = request_code.len() - 1;
-        request_code.truncate(trimmed);
-
-        debug!("Looking up count: {}", request_code);
-
-        let mut conn = {
-            let pool = state.take::<ConnectionBox>().pool;
-            let pool = pool.lock().unwrap();
-
-            pool.get().unwrap()
-        };
-
-        let result = {
-            use self::schema::url::dsl::*;
-
-            url.filter(code.eq(request_code)).first::<Url>(&mut conn)
-        };
-
-        result.map(|url| url.count)
-    };
-
-    let resp = match result {
-        Ok(count) => create_response(
-            &state,
-            StatusCode::Ok,
-            Some((format!("{}", count).into_bytes().to_vec(), mime::TEXT_PLAIN)),
-        ),
-        Err(_) => create_response(&state, StatusCode::NotFound, None),
-    };
-
-    (state, resp)
-}
+use self::middleware::{ConfigMiddleware, DieselMiddleware};
+use self::routes::{create, lookup, LookupExtractor};
+pub use self::utils::generate_code;
 
 fn router(config: Config, thread: usize) -> Router {
     let database_url = config.database_url.clone();
@@ -248,8 +41,9 @@ pub fn run(host: &str, port: u16, thread: usize, config: Config) {
 mod tests {
     use super::config::Config;
     use super::*;
-
     use gotham::test::TestServer;
+    use hyper::header::Location;
+    use hyper::StatusCode;
     use std::env;
     use tracing_subscriber::fmt;
 
