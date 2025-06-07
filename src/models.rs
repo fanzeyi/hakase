@@ -1,10 +1,7 @@
-use super::schema::url;
 use chrono::NaiveDateTime;
-use diesel::Insertable;
-use diesel::Queryable;
+use rusqlite::{Row, Result};
 
-#[derive(Queryable, Debug)]
-#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+#[derive(Debug)]
 pub struct Url {
     pub id: i32,
     pub code: String,
@@ -13,9 +10,25 @@ pub struct Url {
     pub count: i32,
 }
 
-#[derive(Insertable)]
-#[diesel(table_name = url)]
+impl Url {
+    pub fn from_row(row: &Row) -> Result<Url> {
+        Ok(Url {
+            id: row.get(0)?,
+            code: row.get(1)?,
+            myurl: row.get(2)?,
+            create_time: row.get(3)?,
+            count: row.get(4)?,
+        })
+    }
+}
+
 pub struct NewUrl<'a> {
     pub myurl: &'a str,
     pub code: &'a str,
+}
+
+impl<'a> NewUrl<'a> {
+    pub fn new(myurl: &'a str, code: &'a str) -> Self {
+        NewUrl { myurl, code }
+    }
 }

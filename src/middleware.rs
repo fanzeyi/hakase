@@ -1,8 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use diesel::sqlite::SqliteConnection;
-use diesel::r2d2::ConnectionManager;
-use r2d2::Pool;
+use rusqlite::Connection;
 
 use gotham::handler::HandlerFuture;
 use gotham::middleware::Middleware;
@@ -36,10 +34,10 @@ impl ConfigMiddleware {
     }
 }
 
-pub type ConnectionPool = Arc<Mutex<Pool<ConnectionManager<SqliteConnection>>>>;
+pub type ConnectionPool = Arc<Mutex<Connection>>;
 
 #[derive(Clone, NewMiddleware)]
-pub struct DieselMiddleware {
+pub struct SqliteMiddleware {
     pool: ConnectionPool,
 }
 
@@ -49,7 +47,7 @@ pub struct ConnectionBox {
 
 impl StateData for ConnectionBox {}
 
-impl Middleware for DieselMiddleware {
+impl Middleware for SqliteMiddleware {
     fn call<Chain>(self, mut state: State, chain: Chain) -> Box<HandlerFuture>
     where
         Chain: FnOnce(State) -> Box<HandlerFuture>,
@@ -61,16 +59,24 @@ impl Middleware for DieselMiddleware {
     }
 }
 
-impl DieselMiddleware {
-    pub fn new(database_url: String, thread: usize) -> DieselMiddleware {
-        let manager = ConnectionManager::new(database_url);
-        let pool = Pool::builder()
-            .max_size(thread as u32)
-            .build(manager)
-            .unwrap();
+impl SqliteMiddleware {
+    pub fn new(database_url: String) -> SqliteMiddleware {
+        let conn = Connection::open(&database_url).expect("Failed to open database");
+        
+        // Create the table if it doesn't exist
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS url (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                code VARCHAR(20) NOT NULL UNIQUE,
+                url VARCHAR(5000) NOT NULL,
+                create_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                count INTEGER NOT NULL DEFAULT 0
+            )",
+            [],
+        ).expect("Failed to create url table");
 
-        DieselMiddleware {
-            pool: Arc::new(Mutex::new(pool)),
+        SqliteMiddleware {
+            pool: Arc::new(Mutex::new(conn)),
         }
     }
 }

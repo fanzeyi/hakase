@@ -7,20 +7,19 @@ pub mod config;
 mod middleware;
 mod models;
 mod routes;
-mod schema;
 mod utils;
 
 use self::config::Config;
-use self::middleware::{ConfigMiddleware, DieselMiddleware};
+use self::middleware::{ConfigMiddleware, SqliteMiddleware};
 use self::routes::{create, lookup, LookupExtractor};
 pub use self::utils::generate_code;
 
-fn router(config: Config, thread: usize) -> Router {
+fn router(config: Config, _thread: usize) -> Router {
     let database_url = config.database_url.clone();
     let (chain, pipelines) = single_pipeline(
         new_pipeline()
             .add(ConfigMiddleware::new(config))
-            .add(DieselMiddleware::new(database_url, thread))
+            .add(SqliteMiddleware::new(database_url))
             .build(),
     );
 

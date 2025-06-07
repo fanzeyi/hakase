@@ -2,7 +2,7 @@ use futures::{future, Future, Stream};
 use hyper::header::Location;
 use hyper::{Body, Response, StatusCode};
 
-use diesel::prelude::*;
+use rusqlite::params;
 use gotham::handler::HandlerFuture;
 use gotham::http::response::create_response;
 use gotham::state::{FromState, State};
@@ -15,7 +15,6 @@ use tracing::debug;
 use crate::config::Config;
 use crate::middleware::ConnectionBox;
 use crate::models::{NewUrl, Url};
-use crate::schema;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct CreateForm {
@@ -33,10 +32,7 @@ impl CreateForm {
     }
 
     pub fn as_insertable(&self) -> NewUrl {
-        NewUrl {
-            myurl: self.url.as_str(),
-            code: self.code.as_ref().unwrap(),
-        }
+        NewUrl::new(self.url.as_str(), self.code.as_ref().unwrap())
     }
 }
 
@@ -64,12 +60,8 @@ pub fn create(mut state: State) -> Box<HandlerFuture> {
 
     let body = state.take::<Body>();
     let resp = body.concat2().then(move |body| {
-        // why can't we have a nice async connection pool?
-        let mut conn = {
-            let pool = state.take::<ConnectionBox>().pool;
-            let pool = pool.lock().unwrap();
-            pool.get().unwrap()
-        };
+        let pool = state.take::<ConnectionBox>().pool;
+        let conn = pool.lock().unwrap();
 
         let result = body
             .map(|body| body.to_vec())
@@ -85,16 +77,16 @@ pub fn create(mut state: State) -> Box<HandlerFuture> {
             })
             .and_then(|form| Ok(form.ensure_code()))
             .and_then(|form| {
-                let result = {
-                    use schema::url;
-                    let insertable = form.as_insertable();
-                    diesel::insert_into(url::table)
-                        .values(&insertable)
-                        .execute(&mut conn)
-                        .or(Err(CreateError::Bad("can not insert into database")))
-                };
+                let insertable = form.as_insertable();
+                let insert_result = conn.execute(
+                    "INSERT INTO url (code, url) VALUES (?1, ?2)",
+                    params![insertable.code, insertable.myurl],
+                );
 
-                result.and(Ok(form))
+                match insert_result {
+                    Ok(_) => Ok(form),
+                    Err(_) => Err(CreateError::Bad("can not insert into database")),
+                }
             })
             .map(|form| {
                 create_response(&state, StatusCode::Created, None)
@@ -130,26 +122,23 @@ pub fn lookup(mut state: State) -> (State, Response) {
 
     debug!("Looking up code: {}", request_code);
 
-    let mut conn = {
-        let pool = state.take::<ConnectionBox>().pool;
-        let pool = pool.lock().unwrap();
-        pool.get().unwrap()
-    };
+    let pool = state.take::<ConnectionBox>().pool;
+    let conn = pool.lock().unwrap();
 
     let result = {
-        let result = {
-            use crate::schema::url::dsl::*;
-            url.filter(code.eq(request_code)).first::<Url>(&mut conn)
-        };
+        let mut stmt = conn.prepare("SELECT id, code, url, create_time, count FROM url WHERE code = ?1").unwrap();
+        let url_result = stmt.query_row(params![request_code], |row| {
+            Url::from_row(row)
+        });
 
-        result
-            .and_then(|result| {
-                use crate::schema::url::dsl::{count, url};
-                let _ = diesel::update(url.find(result.id))
-                    .set(count.eq(count + 1))
-                    .execute(&mut conn);
-
-                Ok(result)
+        url_result
+            .and_then(|url| {
+                // Update the count
+                conn.execute(
+                    "UPDATE url SET count = count + 1 WHERE id = ?1",
+                    params![url.id],
+                )?;
+                Ok(url)
             })
             .map(|url| url.myurl)
     };
@@ -170,16 +159,13 @@ pub fn lookup_count(mut state: State, mut request_code: String) -> (State, Respo
 
         debug!("Looking up count: {}", request_code);
 
-        let mut conn = {
-            let pool = state.take::<ConnectionBox>().pool;
-            let pool = pool.lock().unwrap();
-            pool.get().unwrap()
-        };
+        let pool = state.take::<ConnectionBox>().pool;
+        let conn = pool.lock().unwrap();
 
-        let result = {
-            use crate::schema::url::dsl::*;
-            url.filter(code.eq(request_code)).first::<Url>(&mut conn)
-        };
+        let mut stmt = conn.prepare("SELECT id, code, url, create_time, count FROM url WHERE code = ?1").unwrap();
+        let result = stmt.query_row(params![request_code], |row| {
+            Url::from_row(row)
+        });
 
         result.map(|url| url.count)
     };
