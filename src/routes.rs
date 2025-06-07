@@ -1,8 +1,8 @@
 use axum::{
-    extract::{Path, State, Form},
-    http::{StatusCode, HeaderMap, header},
-    response::{IntoResponse, Redirect},
     Json,
+    extract::{Form, Path, State},
+    http::{HeaderMap, StatusCode, header},
+    response::{IntoResponse, Redirect},
 };
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
@@ -44,8 +44,9 @@ pub async fn create(
 
     // Validate password if required
     match (&form.password, secret) {
-        (Some(provided_password), Some(required_secret)) if provided_password == required_secret => {},
-        (_, None) => {},
+        (Some(provided_password), Some(required_secret))
+            if provided_password == required_secret => {}
+        (_, None) => {}
         _ => {
             return Err((
                 StatusCode::BAD_REQUEST,
@@ -74,7 +75,7 @@ pub async fn create(
 
     let insert_result = conn.execute(
         "INSERT INTO url (code, url) VALUES (?1, ?2)",
-        params![insertable.code, insertable.myurl],
+        params![insertable.code, insertable.url],
     );
 
     match insert_result {
@@ -112,14 +113,14 @@ pub async fn lookup(
     };
 
     let result = {
-        let mut stmt = match conn.prepare("SELECT id, code, url, create_time, count FROM url WHERE code = ?1") {
+        let mut stmt = match conn
+            .prepare("SELECT id, code, url, create_time, count FROM url WHERE code = ?1")
+        {
             Ok(stmt) => stmt,
             Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         };
 
-        let url_result = stmt.query_row(params![code], |row| {
-            Url::from_row(row)
-        });
+        let url_result = stmt.query_row(params![code], |row| Url::from_row(row));
 
         url_result
             .and_then(|url| {
@@ -130,7 +131,7 @@ pub async fn lookup(
                 )?;
                 Ok(url)
             })
-            .map(|url| url.myurl)
+            .map(|url| url.url)
     };
 
     match result {
@@ -152,15 +153,15 @@ async fn lookup_count(app_state: AppState, mut request_code: String) -> axum::re
     };
 
     let result = {
-        let mut stmt = match conn.prepare("SELECT id, code, url, create_time, count FROM url WHERE code = ?1") {
+        let mut stmt = match conn
+            .prepare("SELECT id, code, url, create_time, count FROM url WHERE code = ?1")
+        {
             Ok(stmt) => stmt,
             Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         };
 
-        stmt.query_row(params![request_code], |row| {
-            Url::from_row(row)
-        })
-        .map(|url| url.count)
+        stmt.query_row(params![request_code], |row| Url::from_row(row))
+            .map(|url| url.count)
     };
 
     match result {
