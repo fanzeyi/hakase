@@ -1,7 +1,4 @@
-use gotham::state::StateData;
-use gotham_derive::StateData;
-
-#[derive(Clone, StateData, Debug)]
+#[derive(Clone, Debug)]
 pub struct Config {
     pub secret: Option<String>,
     pub database_url: String,
@@ -15,5 +12,3 @@ impl Config {
         }
     }
 }
-
-impl StateData for Box<Config> {}

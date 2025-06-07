@@ -1,7 +1,12 @@
-use gotham::pipeline::new_pipeline;
-use gotham::pipeline::single::single_pipeline;
-use gotham::router::builder::{build_router, DefineSingleRoute, DrawRoutes};
-use gotham::router::Router;
+use axum::{
+    middleware::from_fn,
+    routing::{get, post},
+    Router,
+};
+use std::net::SocketAddr;
+use tower::ServiceBuilder;
+use tower_http::{cors::CorsLayer, trace::TraceLayer};
+use tracing::info;
 
 pub mod config;
 mod middleware;
@@ -10,155 +15,129 @@ mod routes;
 mod utils;
 
 use self::config::Config;
-use self::middleware::{ConfigMiddleware, SqliteMiddleware};
-use self::routes::{create, lookup, LookupExtractor};
+use self::middleware::{AppState, logging_middleware};
+use self::routes::{create, lookup};
 pub use self::utils::generate_code;
 
-fn router(config: Config, _thread: usize) -> Router {
-    let database_url = config.database_url.clone();
-    let (chain, pipelines) = single_pipeline(
-        new_pipeline()
-            .add(ConfigMiddleware::new(config))
-            .add(SqliteMiddleware::new(database_url))
-            .build(),
-    );
-
-    build_router(chain, pipelines, |route| {
-        route.post("/create").to(create);
-        route
-            .get("/*")
-            .with_path_extractor::<LookupExtractor>()
-            .to(lookup);
-    })
+fn create_router(app_state: AppState) -> Router {
+    Router::new()
+        .route("/create", post(create))
+        .route("/*path", get(lookup))
+        .layer(
+            ServiceBuilder::new()
+                .layer(TraceLayer::new_for_http())
+                .layer(CorsLayer::permissive())
+                .layer(from_fn(logging_middleware)),
+        )
+        .with_state(app_state)
 }
 
-pub fn run(host: &str, port: u16, thread: usize, config: Config) {
-    gotham::start_with_num_threads((host, port), thread, router(config, thread))
+pub async fn run(host: &str, port: u16, config: Config) {
+    let app_state = AppState::new(config);
+    let app = create_router(app_state);
+
+    let addr: SocketAddr = format!("{}:{}", host, port).parse().unwrap();
+    info!("Server listening on {}", addr);
+
+    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    axum::serve(listener, app).await.unwrap();
 }
 
 #[cfg(test)]
 mod tests {
     use super::config::Config;
     use super::*;
-    use gotham::test::TestServer;
-    use hyper::header::Location;
-    use hyper::StatusCode;
+    use axum_test::TestServer;
     use std::env;
-    use tracing_subscriber::fmt;
 
     fn create_test_server(password: Option<String>) -> TestServer {
-        let config = Config::new(password, env::var("DATABASE_URL").unwrap());
-
-        TestServer::new(router(config, 1)).unwrap()
+        let config = Config::new(password, env::var("DATABASE_URL").unwrap_or_else(|_| ":memory:".to_string()));
+        let app_state = AppState::new(config);
+        let app = create_router(app_state);
+        TestServer::new(app).unwrap()
     }
 
-    #[test]
-    fn create_post() {
-        let ts = create_test_server(None);
-        let response = ts
-            .client()
-            .post(
-                "http://localhost/create",
-                "url=http%3A%2F%2Fwww.google.com%2F",
-                mime::TEXT_PLAIN,
-            )
-            .perform()
-            .unwrap();
+    #[tokio::test]
+    async fn create_post() {
+        let server = create_test_server(None);
+        let response = server
+            .post("/create")
+            .form(&[("url", "http://www.google.com/")])
+            .await;
 
-        assert_eq!(response.status(), StatusCode::Created);
+        assert_eq!(response.status_code(), 201);
     }
 
-    #[test]
-    fn create_post_with_password() {
-        let ts = create_test_server(Some(String::from("secret")));
-        let response = ts
-            .client()
-            .post(
-                "http://localhost/create",
-                "url=http%3A%2F%2Fwww.google.com%2F",
-                mime::TEXT_PLAIN,
-            )
-            .perform()
-            .unwrap();
+    #[tokio::test]
+    async fn create_post_with_password() {
+        let server = create_test_server(Some(String::from("secret")));
+        
+        let response = server
+            .post("/create")
+            .form(&[("url", "http://www.google.com/")])
+            .await;
 
-        assert_ne!(response.status(), StatusCode::Created);
-        assert_eq!(response.status(), StatusCode::BadRequest);
+        assert_ne!(response.status_code(), 201);
+        assert_eq!(response.status_code(), 400);
 
-        let response = ts
-            .client()
-            .post(
-                "http://localhost/create",
-                "url=http%3A%2F%2Fwww.google.com%2F&password=secret",
-                mime::TEXT_PLAIN,
-            )
-            .perform()
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::Created);
+        let response = server
+            .post("/create")
+            .form(&[("url", "http://www.google.com/"), ("password", "secret")])
+            .await;
+        
+        assert_eq!(response.status_code(), 201);
     }
 
-    #[test]
-    fn create_post_with_code() {
-        let ts = create_test_server(None);
+    #[tokio::test]
+    async fn create_post_with_code() {
+        let server = create_test_server(None);
         let code = format!("test-{}", generate_code());
-        let body = format!("url=http%3A%2F%2Fwww.google.com%2F&code={}", code);
-        let response = ts
-            .client()
-            .post("http://localhost/create", body, mime::TEXT_PLAIN)
-            .perform()
-            .unwrap();
+        
+        let response = server
+            .post("/create")
+            .form(&[("url", "http://www.google.com/"), ("code", &code)])
+            .await;
 
-        let status = response.status();
+        assert_eq!(response.status_code(), 201);
 
-        assert_eq!(status, StatusCode::Created);
-
-        let location = response.headers().get::<Location>();
-        let value = location.unwrap().to_string();
-
-        assert_eq!(value, format!("/{}", code));
+        let location = response.header("location");
+        assert_eq!(location, format!("/{}", code));
     }
 
-    #[test]
-    fn test_lookup() {
-        let subscriber = fmt::Subscriber::builder()
+    #[tokio::test]
+    async fn test_lookup() {
+        let subscriber = tracing_subscriber::fmt()
             .with_env_filter("hakase=info")
             .with_writer(std::io::stderr)
             .finish();
 
-        tracing::subscriber::set_global_default(subscriber)
-            .expect("Failed to set global default subscriber");
+        let _ = tracing::subscriber::set_global_default(subscriber);
 
-        let ts = create_test_server(None);
+        let server = create_test_server(None);
         let url = "http://www.google.com";
-        let payload = &[("url", url)];
-        let body = serde_urlencoded::to_string(payload).unwrap();
+        
+        let response = server
+            .post("/create")
+            .form(&[("url", url)])
+            .await;
 
-        let response = ts
-            .client()
-            .post("http://localhost/create", body, mime::TEXT_PLAIN)
-            .perform()
-            .unwrap();
+        let location_header = response.header("location");
+        let location = location_header.to_str().unwrap();
+        
+        let response = server
+            .get(location)
+            .await;
 
-        let location = response.headers().get::<Location>();
-        let location = location.unwrap();
+        assert_eq!(response.status_code(), 308); // Permanent redirect
+        let redirect_header = response.header("location");
+        let redirect_location = redirect_header.to_str().unwrap();
+        assert_eq!(redirect_location, url);
 
-        let response = ts
-            .client()
-            .get(&format!("http://localhost{}", location))
-            .perform()
-            .unwrap();
+        let response = server
+            .get(&format!("{}~", location))
+            .await;
 
-        let result = response.headers().get::<Location>().unwrap().to_string();
-
-        assert_eq!(result, url);
-
-        let response = ts
-            .client()
-            .get(&format!("http://localhost{}~", location))
-            .perform()
-            .unwrap();
-
-        let body = response.read_body().unwrap();
-
-        assert_eq!(&body[..], b"1");
+        let body = response.text();
+        assert_eq!(body, "1");
     }
 }

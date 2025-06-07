@@ -1,66 +1,25 @@
 use std::sync::{Arc, Mutex};
 
+use axum::{
+    extract::Request,
+    middleware::Next,
+    response::Response,
+};
 use rusqlite::Connection;
-
-use gotham::handler::HandlerFuture;
-use gotham::middleware::Middleware;
-use gotham::state::State;
-use gotham::state::StateData;
-use gotham_derive::NewMiddleware;
 
 use super::config::Config;
 
-#[derive(Clone, NewMiddleware)]
-pub struct ConfigMiddleware {
-    config: Box<Config>,
-}
-
-impl Middleware for ConfigMiddleware {
-    fn call<Chain>(self, mut state: State, chain: Chain) -> Box<HandlerFuture>
-    where
-        Chain: FnOnce(State) -> Box<HandlerFuture>,
-    {
-        state.put(self.config);
-
-        Box::new(chain(state))
-    }
-}
-
-impl ConfigMiddleware {
-    pub fn new(config: Config) -> ConfigMiddleware {
-        ConfigMiddleware {
-            config: Box::new(config),
-        }
-    }
-}
-
 pub type ConnectionPool = Arc<Mutex<Connection>>;
 
-#[derive(Clone, NewMiddleware)]
-pub struct SqliteMiddleware {
-    pool: ConnectionPool,
-}
-
-pub struct ConnectionBox {
+#[derive(Clone)]
+pub struct AppState {
+    pub config: Config,
     pub pool: ConnectionPool,
 }
 
-impl StateData for ConnectionBox {}
-
-impl Middleware for SqliteMiddleware {
-    fn call<Chain>(self, mut state: State, chain: Chain) -> Box<HandlerFuture>
-    where
-        Chain: FnOnce(State) -> Box<HandlerFuture>,
-    {
-        state.put(ConnectionBox {
-            pool: self.pool.clone(),
-        });
-        Box::new(chain(state))
-    }
-}
-
-impl SqliteMiddleware {
-    pub fn new(database_url: String) -> SqliteMiddleware {
+impl AppState {
+    pub fn new(config: Config) -> Self {
+        let database_url = config.database_url.clone();
         let conn = Connection::open(&database_url).expect("Failed to open database");
         
         // Create the table if it doesn't exist
@@ -75,8 +34,23 @@ impl SqliteMiddleware {
             [],
         ).expect("Failed to create url table");
 
-        SqliteMiddleware {
+        Self {
+            config,
             pool: Arc::new(Mutex::new(conn)),
         }
     }
+}
+
+// Middleware function for logging (optional)
+pub async fn logging_middleware(request: Request, next: Next) -> Response {
+    let method = request.method().clone();
+    let uri = request.uri().clone();
+    
+    tracing::debug!("{} {}", method, uri);
+    
+    let response = next.run(request).await;
+    
+    tracing::debug!("Response status: {}", response.status());
+    
+    response
 }

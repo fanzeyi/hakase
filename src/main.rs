@@ -33,7 +33,8 @@ struct Args {
     secret: Option<String>,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let args = Args::parse();
 
     let filter = if args.debug {
@@ -52,9 +53,8 @@ fn main() {
 
     let host = &args.host;
     let port = args.port;
-    let thread = args.thread;
     let database_url = args.database.clone();
     let config = config::Config::new(args.secret.clone(), database_url);
 
-    hakase::run(host, port, thread, config);
+    hakase::run(host, port, config).await;
 }

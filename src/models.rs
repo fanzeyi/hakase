@@ -1,7 +1,8 @@
 use chrono::NaiveDateTime;
 use rusqlite::{Row, Result};
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Url {
     pub id: i32,
     pub code: String,

@@ -1,19 +1,14 @@
-use futures::{future, Future, Stream};
-use hyper::header::Location;
-use hyper::{Body, Response, StatusCode};
-
+use axum::{
+    extract::{Path, State, Form},
+    http::{StatusCode, HeaderMap, header},
+    response::{IntoResponse, Redirect},
+    Json,
+};
 use rusqlite::params;
-use gotham::handler::HandlerFuture;
-use gotham::http::response::create_response;
-use gotham::state::{FromState, State};
-use gotham_derive::StateData;
-use gotham_derive::StaticResponseExtender;
-use serde_derive::Deserialize;
-use serde_derive::Serialize;
+use serde::{Deserialize, Serialize};
 use tracing::debug;
 
-use crate::config::Config;
-use crate::middleware::ConnectionBox;
+use crate::middleware::AppState;
 use crate::models::{NewUrl, Url};
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -36,98 +31,93 @@ impl CreateForm {
     }
 }
 
-pub enum CreateError {
-    Bad(&'static str),
+#[derive(Serialize)]
+pub struct ErrorResponse {
+    error: String,
 }
 
-impl CreateError {
-    pub fn into_response(self, state: &State) -> Response {
-        match self {
-            CreateError::Bad(reason) => create_response(
-                state,
-                StatusCode::BadRequest,
-                Some((reason.as_bytes().to_vec(), mime::TEXT_PLAIN)),
-            ),
+pub async fn create(
+    State(app_state): State<AppState>,
+    Form(form): Form<CreateForm>,
+) -> Result<impl IntoResponse, impl IntoResponse> {
+    let secret = &app_state.config.secret;
+
+    // Validate password if required
+    match (&form.password, secret) {
+        (Some(provided_password), Some(required_secret)) if provided_password == required_secret => {},
+        (_, None) => {},
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "password does not match".to_string(),
+                }),
+            ));
         }
     }
-}
 
-pub fn create(mut state: State) -> Box<HandlerFuture> {
-    let secret = {
-        let config = Box::<Config>::borrow_from(&state);
-        config.secret.clone()
+    let form = form.ensure_code();
+    let insertable = form.as_insertable();
+
+    let pool = app_state.pool;
+    let conn = match pool.lock() {
+        Ok(conn) => conn,
+        Err(_) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "database connection failed".to_string(),
+                }),
+            ));
+        }
     };
 
-    let body = state.take::<Body>();
-    let resp = body.concat2().then(move |body| {
-        let pool = state.take::<ConnectionBox>().pool;
-        let conn = pool.lock().unwrap();
+    let insert_result = conn.execute(
+        "INSERT INTO url (code, url) VALUES (?1, ?2)",
+        params![insertable.code, insertable.myurl],
+    );
 
-        let result = body
-            .map(|body| body.to_vec())
-            .map_err(|_| CreateError::Bad("body parse failed."))
-            .and_then(|body| {
-                serde_urlencoded::from_bytes::<CreateForm>(&body[..])
-                    .map_err(|_| CreateError::Bad("url decode failed"))
-            })
-            .and_then(|data| match (data.password.clone(), secret) {
-                (Some(ref password), Some(ref secret)) if password == secret => Ok(data),
-                (_, None) => Ok(data),
-                _ => Err(CreateError::Bad("password does not match")),
-            })
-            .and_then(|form| Ok(form.ensure_code()))
-            .and_then(|form| {
-                let insertable = form.as_insertable();
-                let insert_result = conn.execute(
-                    "INSERT INTO url (code, url) VALUES (?1, ?2)",
-                    params![insertable.code, insertable.myurl],
-                );
-
-                match insert_result {
-                    Ok(_) => Ok(form),
-                    Err(_) => Err(CreateError::Bad("can not insert into database")),
-                }
-            })
-            .map(|form| {
-                create_response(&state, StatusCode::Created, None)
-                    .with_header(Location::new(format!("/{}", form.code.unwrap())))
-            });
-
-        let resp = match result {
-            Ok(resp) => resp,
-            Err(e) => e.into_response(&state),
-        };
-
-        future::ok((state, resp))
-    });
-
-    Box::new(resp)
+    match insert_result {
+        Ok(_) => {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::LOCATION,
+                format!("/{}", form.code.unwrap()).parse().unwrap(),
+            );
+            Ok((StatusCode::CREATED, headers))
+        }
+        Err(_) => Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "can not insert into database".to_string(),
+            }),
+        )),
+    }
 }
 
-#[derive(Deserialize, StateData, StaticResponseExtender)]
-pub struct LookupExtractor {
-    #[serde(rename = "*")]
-    pub code: Vec<String>,
-}
-
-pub fn lookup(mut state: State) -> (State, Response) {
-    let request_code = {
-        let path = LookupExtractor::borrow_from(&state);
-        path.code.join("/")
-    };
-
-    if request_code.ends_with("~") {
-        return lookup_count(state, request_code);
+pub async fn lookup(
+    State(app_state): State<AppState>,
+    Path(code): Path<String>,
+) -> axum::response::Response {
+    if code.ends_with("~") {
+        return lookup_count(app_state, code).await.into_response();
     }
 
-    debug!("Looking up code: {}", request_code);
+    debug!("Looking up code: {}", code);
 
-    let pool = state.take::<ConnectionBox>().pool;
-    let conn = pool.lock().unwrap();
+    let pool = app_state.pool;
+    let conn = match pool.lock() {
+        Ok(conn) => conn,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
 
     let result = {
-        let mut stmt = conn.prepare("SELECT id, code, url, create_time, count FROM url WHERE code = ?1").unwrap();
-        let url_result = stmt.query_row(params![request_code], |row| {
+        let mut stmt = match conn.prepare("SELECT id, code, url, create_time, count FROM url WHERE code = ?1") {
+            Ok(stmt) => stmt,
+            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        };
+
+        let url_result = stmt.query_row(params![code], |row| {
             Url::from_row(row)
         });
 
@@ -143,41 +133,42 @@ pub fn lookup(mut state: State) -> (State, Response) {
             .map(|url| url.myurl)
     };
 
-    let resp = match result {
-        Ok(url) => create_response(&state, StatusCode::MovedPermanently, None)
-            .with_header(Location::new(url)),
-        Err(_) => create_response(&state, StatusCode::NotFound, None),
-    };
-
-    (state, resp)
+    match result {
+        Ok(url) => Redirect::permanent(&url).into_response(),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
-pub fn lookup_count(mut state: State, mut request_code: String) -> (State, Response) {
+async fn lookup_count(app_state: AppState, mut request_code: String) -> axum::response::Response {
+    let trimmed = request_code.len() - 1;
+    request_code.truncate(trimmed);
+
+    debug!("Looking up count: {}", request_code);
+
+    let pool = app_state.pool;
+    let conn = match pool.lock() {
+        Ok(conn) => conn,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+
     let result = {
-        let trimmed = request_code.len() - 1;
-        request_code.truncate(trimmed);
+        let mut stmt = match conn.prepare("SELECT id, code, url, create_time, count FROM url WHERE code = ?1") {
+            Ok(stmt) => stmt,
+            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        };
 
-        debug!("Looking up count: {}", request_code);
-
-        let pool = state.take::<ConnectionBox>().pool;
-        let conn = pool.lock().unwrap();
-
-        let mut stmt = conn.prepare("SELECT id, code, url, create_time, count FROM url WHERE code = ?1").unwrap();
-        let result = stmt.query_row(params![request_code], |row| {
+        stmt.query_row(params![request_code], |row| {
             Url::from_row(row)
-        });
-
-        result.map(|url| url.count)
+        })
+        .map(|url| url.count)
     };
 
-    let resp = match result {
-        Ok(count) => create_response(
-            &state,
-            StatusCode::Ok,
-            Some((format!("{}", count).into_bytes().to_vec(), mime::TEXT_PLAIN)),
-        ),
-        Err(_) => create_response(&state, StatusCode::NotFound, None),
-    };
-
-    (state, resp)
+    match result {
+        Ok(count) => {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::CONTENT_TYPE, "text/plain".parse().unwrap());
+            (StatusCode::OK, headers, format!("{}", count)).into_response()
+        }
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
 }
